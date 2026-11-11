@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Grid Downtime</title>
+<meta name="description" content="Log robot grid downtime and see daily, weekly and monthly reports.">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#14171c" media="(prefers-color-scheme: dark)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Grid Downtime">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="apple-touch-icon" href="assets/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&family=JetBrains+Mono:wght@500;600&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="top"><div class="wrap top-in">
+  <div class="brand">
+    <picture><source srcset="assets/logo-white.png" media="(prefers-color-scheme: dark)"><img src="assets/logo.png" alt="Company logo" class="logo" width="562" height="115"></picture>
+    <div class="b-sep"></div><div><div class="b1">Grid Downtime</div><div class="b2" id="hdr-date"></div></div>
+  </div>
+  <button class="sync" id="sync" type="button"><i></i><span>Starting…</span></button>
+</div></header>
+
+<main class="wrap" id="main">
+  <section id="v-log" class="view">
+    <div class="status" id="status">
+      <div class="st-row"><span class="st-dot"></span><span class="st-label" id="st-label">Grid running</span></div>
+      <div class="clock" id="clock">00:00:00</div>
+      <div class="st-sub" id="st-sub"></div>
+      <button class="big" id="big" type="button"><span class="big-t" id="big-t">Grid OFF</span><span class="big-s" id="big-s">Tap when you stop the grid</span></button>
+    </div>
+    <div id="stop-details" class="card" hidden>
+      <div class="issues" id="act-issues"></div>
+      <label class="fld"><span>Grid stopped at</span><input id="act-start" type="datetime-local"></label>
+      <label class="fld"><span>Notes</span><textarea id="act-notes" rows="2" placeholder="What happened and what you fixed"></textarea></label>
+    </div>
+    <div class="sec-h"><h2>Today</h2><button class="link" id="add-past" type="button">+ Add past downtime</button></div>
+    <div class="today-stats" id="today-stats"></div>
+    <div class="list" id="today-list"></div>
+  </section>
+
+  <section id="v-history" class="view" hidden>
+    <div class="sec-h"><h2>History</h2><button class="link" id="add-past2" type="button">+ Add entry</button></div>
+    <div class="chips scroll" id="hist-filter"></div>
+    <div class="list" id="hist-list"></div>
+  </section>
+
+  <section id="v-reports" class="view" hidden>
+    <div class="seg" id="rep-mode" role="tablist">
+      <span class="seg-pill" aria-hidden="true"></span>
+      <button type="button" role="tab" data-mode="day">Daily</button>
+      <button type="button" role="tab" data-mode="week">Weekly</button>
+      <button type="button" role="tab" data-mode="month">Monthly</button>
+    </div>
+    <div class="pager">
+      <button type="button" id="rep-prev" aria-label="Previous period">‹</button>
+      <div class="pg-label"><div id="rep-label"></div><div id="rep-sub" class="muted"></div></div>
+      <button type="button" id="rep-next" aria-label="Next period">›</button>
+    </div>
+    <div id="rep-body" class="view"></div>
+    <div class="actions">
+      <button type="button" class="btn" id="rep-copy">Copy summary</button>
+      <button type="button" class="btn" id="rep-csv">Export CSV</button>
+    </div>
+    <p class="hint">PDF reports are emailed automatically at 3 pm on working days (weekly on Fridays, monthly on the last working day).</p>
+  </section>
+
+  <section id="v-more" class="view" hidden>
+    <h2>Settings</h2>
+    <div class="card" id="conn-card"></div>
+    <div class="card">
+      <h3>Test reports</h3>
+      <p class="muted">Sends the report as it would look right now, to your own Google email only.</p>
+      <div class="actions">
+        <button type="button" class="btn" data-test="daily">Daily</button>
+        <button type="button" class="btn" data-test="weekly">Weekly</button>
+        <button type="button" class="btn" data-test="monthly">Monthly</button>
+      </div>
+    </div>
+    <div class="card">
+      <h3>Backup and export</h3>
+      <p class="muted">Your log is in your Google Sheet. A backup file is a second copy you can restore here.</p>
+      <div class="actions"><button type="button" class="btn" id="bk-save">Download backup</button><button type="button" class="btn" id="all-csv">Export all as CSV</button></div>
+      <label class="btn file"><input type="file" id="bk-file" accept=".json,application/json">Restore from backup file</label>
+      <div id="bk-confirm"></div>
+    </div>
+    <div class="card"><h3>Causes</h3><div class="chips static" id="cause-list"></div></div>
+    <div class="card">
+      <h3>Install on your phone</h3>
+      <p class="muted">iPhone: open in Safari, tap Share, then Add to Home Screen. Android: open in Chrome, tap ⋮, then Add to Home screen or Install app. It then opens full screen and works without signal.</p>
+    </div>
+    <p class="hint" id="ver"></p>
+  </section>
+</main>
+
+<nav class="tabs" aria-label="Sections"><div class="tabs-in">
+  <span class="tab-ind" aria-hidden="true"></span>
+  <a href="#log" data-v="log"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 2.5M9 2h6"/></svg>Log<span class="live-dot" id="tab-live" hidden></span></a>
+  <a href="#history" data-v="history"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg>History</a>
+  <a href="#reports" data-v="reports"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 20V10M10 20V4M16 20v-7M21 20H3"/></svg>Reports</a>
+  <a href="#more" data-v="more"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>Settings</a>
+</div></nav>
+
+<div class="sheet-bg" id="sheet" hidden>
+  <form class="sheet" id="ed-form" novalidate>
+    <div class="grab" aria-hidden="true"></div>
+    <div class="sh-h"><h3 id="ed-title">Edit downtime</h3><button type="button" class="x" id="ed-close" aria-label="Close">×</button></div>
+    <div class="ed-msg" id="ed-msg"></div>
+    <div class="row2">
+      <label class="fld"><span>Grid off</span><input id="ed-start" type="datetime-local"></label>
+      <label class="fld"><span>Grid on</span><input id="ed-end" type="datetime-local"></label>
+    </div>
+    <div class="ed-dur" id="ed-dur"></div>
+    <div class="issues" id="ed-issues"></div>
+    <label class="fld"><span>Notes</span><textarea id="ed-notes" rows="3" placeholder="What happened and what you fixed"></textarea></label>
+    <div class="sh-actions">
+      <button type="button" class="btn danger" id="ed-del">Delete</button>
+      <span class="sp"></span>
+      <button type="button" class="btn" id="ed-cancel">Cancel</button>
+      <button type="submit" class="btn primary">Save</button>
+    </div>
+  </form>
+</div>
+
+<div class="sheet-bg" id="txt-sheet" hidden>
+  <div class="sheet">
+    <div class="grab" aria-hidden="true"></div>
+    <div class="sh-h"><h3 id="txt-title">Copy text</h3><button type="button" class="x" id="txt-close" aria-label="Close">×</button></div>
+    <p class="muted" style="margin:0">Select the text below and copy it.</p>
+    <textarea class="txt-out" id="txt-out" readonly></textarea>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"><span id="toast-msg"></span><button type="button" id="toast-act" hidden></button></div>
+<script src="app.js"></script>
+</body>
+</html>

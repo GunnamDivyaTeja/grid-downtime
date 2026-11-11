@@ -1,0 +1,16 @@
+{
+  "name": "Grid Downtime",
+  "short_name": "Grid Downtime",
+  "description": "Log robot grid downtime and see daily, weekly and monthly reports.",
+  "start_url": "./#log",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#eef0f4",
+  "theme_color": "#534AE3",
+  "icons": [
+    { "src": "assets/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "assets/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "assets/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

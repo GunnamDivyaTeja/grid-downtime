@@ -2,7 +2,7 @@
  * App files are served from the phone first and refreshed in the background, so a new
  * version you upload to GitHub shows up the next time the app is opened.
  * Calls to Google (sync) are never cached. */
-const CACHE = "grid-downtime-v1";
+const CACHE = "grid-downtime-v3";
 const FONT_CACHE = "grid-downtime-fonts";
 const SHELL = ["./", "index.html", "styles.css", "app.js", "manifest.webmanifest",
   "assets/logo.png", "assets/logo-white.png", "assets/favicon.png", "assets/apple-touch-icon.png",

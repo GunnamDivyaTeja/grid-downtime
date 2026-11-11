@@ -4,7 +4,7 @@
  */
 (function () {
 "use strict";
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const CAUSES = ["Collision", "Human Error", "Network Error", "Robot Error", "Low Battery"];
 const ORDER = [...CAUSES, ""];
 const CVAR = { "Collision": "--c1", "Human Error": "--c2", "Network Error": "--c3", "Robot Error": "--c4", "Low Battery": "--c5" };
@@ -49,18 +49,24 @@ let prefs = Object.assign({ mode: "week" }, load(LS_PREFS, {}));
 const persist = () => save(LS, S);
 
 /* ---------- entries ---------- */
-const blankIssue = () => ({ robot: "", cause: "" });
+const blankIssue = () => ({ robot: "", cause: "", note: "" });
+/** Each robot has its own cause and note. Older entries had one note for the whole stoppage: it moves to the first robot. */
 function issuesOf(e) {
-  if (e && Array.isArray(e.issues) && e.issues.length) return e.issues.map(i => ({ robot: String((i && i.robot) || ""), cause: CAUSES.includes(i && i.cause) ? i.cause : "" }));
-  return [{ robot: String((e && e.robot) || ""), cause: CAUSES.includes(e && e.cause) ? e.cause : "" }];
+  const list = e && Array.isArray(e.issues) && e.issues.length
+    ? e.issues.map(i => ({ robot: String((i && i.robot) || ""), cause: CAUSES.includes(i && i.cause) ? i.cause : "", note: String((i && i.note) || "") }))
+    : [{ robot: String((e && e.robot) || ""), cause: CAUSES.includes(e && e.cause) ? e.cause : "", note: "" }];
+  const legacy = String((e && e.notes) || "").trim();
+  if (legacy && !list.some(i => i.note)) list[0] = { ...list[0], note: legacy };
+  return list;
 }
-const cleanIssues = a => { const f = a.filter(i => i.robot || i.cause); return f.length ? f : [blankIssue()]; };
+const cleanIssues = a => { const f = a.filter(i => i.robot || i.cause || i.note); return f.length ? f : [blankIssue()]; };
 const mainCause = a => (a.find(i => i.cause) || {}).cause || "";
+const notesText = issues => issues.filter(i => i.note).map(i => (i.robot ? i.robot + ": " : "") + i.note).join(" · ");
 function toItem(id, e, s, en, live) {
   const issues = cleanIssues(issuesOf(e));
-  return { id, s, e: en, issues, cause: mainCause(issues), robots: issues.map(i => i.robot).filter(Boolean), notes: e.notes || "", live: !!live };
+  return { id, s, e: en, issues, cause: mainCause(issues), robots: issues.map(i => i.robot).filter(Boolean), notes: notesText(issues), live: !!live };
 }
-function eventData(start, end, issues, notes) { return { start, end, issues: cleanIssues(issues), notes }; }
+function eventData(start, end, issues) { return { start, end, issues: cleanIssues(issues), notes: "" }; }
 let EV = [];
 function derive() {
   EV = Object.entries(S.events).map(([id, e]) => toItem(id, e, Date.parse(e.start), Date.parse(e.end)))
@@ -240,10 +246,11 @@ function issuesHTML(list) {
   return list.map((it, i) => `<div class="issue" data-i="${i}">
     <div class="iss-h"><span class="fld-label">${one ? "Robot and cause" : `Robot ${i + 1}${i === 0 ? " · main cause" : ""}`}</span>${one ? "" : `<button type="button" class="link rm" data-act="rm">Remove</button>`}</div>
     <input class="iss-robot" autocomplete="off" autocapitalize="characters" placeholder="Robot ID, e.g. R-112" value="${esc(it.robot)}" aria-label="Robot ${i + 1} ID">
-    <div class="chips">${chipsHTML(it.cause)}</div></div>`).join("") + `<button type="button" class="btn add" data-act="add">+ Add another robot</button>`;
+    <div class="chips">${chipsHTML(it.cause)}</div>
+    <textarea class="iss-note" rows="2" placeholder="Notes: what was wrong, what you did" aria-label="Robot ${i + 1} notes">${esc(it.note || "")}</textarea></div>`).join("") + `<button type="button" class="btn add" data-act="add">+ Add another robot</button>`;
 }
 function readIssues(box) {
-  return Array.from(box.querySelectorAll(".issue")).map(el => ({ robot: el.querySelector(".iss-robot").value.trim(), cause: (el.querySelector(".chip.on") || { dataset: {} }).dataset.cause || "" }));
+  return Array.from(box.querySelectorAll(".issue")).map(el => ({ robot: el.querySelector(".iss-robot").value.trim(), cause: (el.querySelector(".chip.on") || { dataset: {} }).dataset.cause || "", note: el.querySelector(".iss-note").value.trim() }));
 }
 function issueClick(box, e) {
   const t = e.target, el = t.closest(".issue"), list = readIssues(box);
@@ -309,7 +316,7 @@ function render() {
 }
 
 /* Log */
-const big = $("#big"), actBox = $("#act-issues"), notesEl = $("#act-notes");
+const big = $("#big"), actBox = $("#act-issues");
 const lastEnded = () => EV.reduce((m, x) => x.e > m ? x.e : m, 0);
 function renderLog() {
   const now = Date.now(), a = S.active;
@@ -321,9 +328,11 @@ function renderLog() {
   $("#stop-details").hidden = !a;
   if (a) {
     const ae = document.activeElement;
-    if (!(ae && ae.tagName === "INPUT" && actBox.contains(ae))) actBox.innerHTML = issuesHTML(issuesOf(a));
+    // Redraw the robot cards only when they differ from what's saved, so a tap on a card's button isn't lost
+    // to a redraw caused by the text box losing focus.
+    const typing = ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA") && actBox.contains(ae);
+    if (!typing && JSON.stringify(readIssues(actBox)) !== JSON.stringify(issuesOf(a))) actBox.innerHTML = issuesHTML(issuesOf(a));
     const st = $("#act-start");
-    if (document.activeElement !== notesEl) notesEl.value = a.notes || "";
     if (document.activeElement !== st) { const s = Date.parse(a.start); st.value = isFinite(s) ? toInput(s) : ""; }
   }
   renderToday(now);
@@ -353,7 +362,7 @@ big.onclick = () => {
   } else {
     clearTimeout(actT);
     const a = S.active, id = newId();
-    const data = eventData(a.start, iso, readIssues(actBox), notesEl.value.trim());
+    const data = eventData(a.start, iso, readIssues(actBox));
     commit({ t: "ev", id, data }); commit({ t: "act", data: null });
     const d = now - Date.parse(a.start);
     if (!mainCause(data.issues)) { openEdit(id); setEdMsg(`Logged ${fmtDur(d)} of downtime. Pick a cause and save.`, "info"); }
@@ -363,17 +372,15 @@ big.onclick = () => {
 function patchActive(p) { if (S.active) commit({ t: "act", data: { ...S.active, ...p } }); }
 actBox.addEventListener("click", e => {
   if (!S.active) return; const r = issueClick(actBox, e); if (!r) return;
-  clearTimeout(actT); patchActive({ issues: r.list, notes: notesEl.value.trim() });
+  clearTimeout(actT); patchActive({ issues: r.list, notes: "" });
   actBox.innerHTML = issuesHTML(r.list); // redraw even if a text box still has focus (iPhone keeps focus on tap)
   if (r.focus != null) { const ins = actBox.querySelectorAll(".iss-robot"); if (ins[r.focus]) ins[r.focus].focus(); }
 });
-actBox.addEventListener("input", () => { clearTimeout(actT); actT = setTimeout(() => patchActive({ issues: readIssues(actBox), notes: notesEl.value.trim() }), 800); });
+actBox.addEventListener("input", () => { clearTimeout(actT); actT = setTimeout(() => patchActive({ issues: readIssues(actBox), notes: "" }), 800); });
 actBox.addEventListener("focusout", e => {
-  if (!S.active || !e.target.classList.contains("iss-robot")) return;
-  const list = readIssues(actBox); if (JSON.stringify(list) !== JSON.stringify(issuesOf(S.active))) { clearTimeout(actT); patchActive({ issues: list }); }
+  if (!S.active || !e.target.matches(".iss-robot, .iss-note")) return;
+  const list = readIssues(actBox); if (JSON.stringify(list) !== JSON.stringify(issuesOf(S.active))) { clearTimeout(actT); patchActive({ issues: list, notes: "" }); }
 });
-notesEl.addEventListener("input", () => { clearTimeout(actT); actT = setTimeout(() => patchActive({ notes: notesEl.value.trim(), issues: readIssues(actBox) }), 800); });
-notesEl.addEventListener("blur", () => { if (S.active && (S.active.notes || "") !== notesEl.value.trim()) { clearTimeout(actT); patchActive({ notes: notesEl.value.trim(), issues: readIssues(actBox) }); } });
 $("#act-start").addEventListener("change", e => {
   const t = fromInput(e.target.value);
   if (!isFinite(t) || t > Date.now()) { toast("Stop time can't be in the future."); renderLog(); return; }
@@ -554,8 +561,129 @@ function renderConn() {
       <div class="actions"><button type="button" class="btn" id="cf-sync">Sync now</button><button type="button" class="btn danger" id="cf-off">Disconnect</button></div>`;
   }
 }
+/* Report schedule: stored in the Google Sheet, edited here. The last copy loaded is kept on the
+   phone so the screen (and the Reports tab's note) can show it without signal. */
+const LS_SCHED = "grid-downtime.sched";
+const SC = { saved: load(LS_SCHED, null), draft: null, loading: false, saving: false, msg: "", msgCls: "", loadedAt: 0, emailErr: {} };
+const RTYPES = ["daily", "weekly", "monthly"], RNAME = { daily: "Daily", weekly: "Weekly", monthly: "Monthly" };
+const WDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
+const EMAIL_OK = s => /^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]+$/.test(s);
+const hourLabel = h => `${h % 12 || 12}:00 ${h < 12 ? "am" : "pm"}`;
+const keyDate = k => new Date(k + "T12:00:00");
+const schedCopy = s => s && JSON.parse(JSON.stringify({ reports: s.reports, holidays: s.holidays, saveToDrive: s.saveToDrive }));
+const schedDirty = () => !!(SC.draft && SC.saved && JSON.stringify(schedCopy(SC.draft)) !== JSON.stringify(schedCopy(SC.saved)));
+function ruleText(t, r) {
+  if (t === "daily") return "Every working day";
+  if (t === "weekly") return r.day === "last" ? "Last working day of the week" : `Every ${WDAYS[r.day - 1]}`;
+  return "Last working day of the month";
+}
+async function loadSched(force) {
+  if (!cfg || SC.loading || (!force && Date.now() - SC.loadedAt < 60000)) return;
+  SC.loading = true; renderSched();
+  try {
+    const j = await api({ action: "getSettings" }, 30000);
+    if (j && j.ok && j.settings) { SC.saved = j.settings; save(LS_SCHED, j.settings); SC.loadedAt = Date.now(); if (!schedDirty()) SC.draft = schedCopy(j.settings); SC.msg = ""; }
+    else SC.msg = j && j.error === "bad_key" ? "The key was rejected. Reconnect from the Sheet." : "Couldn't load the schedule" + (j && j.error === "bad_request" ? "" : ". Update the Google script to the latest version.");
+    SC.msgCls = j && j.ok ? "" : "err";
+  } catch (e) { SC.msg = SC.saved ? "Offline: showing the schedule from your last connection." : "Connect to the internet to load the schedule."; SC.msgCls = SC.saved ? "" : "err"; }
+  SC.loading = false; renderSched(); renderRepHint();
+}
+function renderRepHint() {
+  const s = SC.saved, el = $("#rep-hint"); if (!el || !s) return;
+  const on = RTYPES.filter(t => s.reports[t].on);
+  el.textContent = on.length ? "PDF reports are emailed automatically: " + on.map(t => `${t} at ${hourLabel(s.reports[t].hour)} (${ruleText(t, s.reports[t]).toLowerCase()})`).join("; ") + ". Change this in Settings → Report schedule."
+    : "Automatic PDF reports are switched off. Turn them on in Settings → Report schedule.";
+}
+function renderSched() {
+  const el = $("#sched-card"); if (!el) return;
+  if (!cfg) { el.innerHTML = `<h3>Report schedule</h3><p class="muted">Connect to your Google Sheet to set when reports are sent and who gets them.</p>`; return; }
+  if (!SC.draft && SC.saved) SC.draft = schedCopy(SC.saved);
+  const d = SC.draft;
+  if (!d) { el.innerHTML = `<h3>Report schedule</h3><p class="sched-msg ${SC.msgCls}">${SC.loading ? "Loading…" : esc(SC.msg || "Loading…")}</p>${SC.loading ? "" : `<button type="button" class="btn" data-sc="reload">Try again</button>`}`; return; }
+  const dirty = schedDirty(), hours = [...new Set([...Array.from({ length: 18 }, (_, i) => i + 6), ...RTYPES.map(t => d.reports[t].hour)])].sort((a, b) => a - b);
+  const next = t => { const k = SC.saved && SC.saved.next && SC.saved.next[t]; return !dirty && k ? `<span class="rp-next">Next: ${df.format(keyDate(k))}, ${hourLabel(SC.saved.reports[t].hour)}</span>` : ""; };
+  el.innerHTML = `<h3>Report schedule</h3>
+    <p class="muted">PDF reports are emailed automatically, Melbourne time. They cover up to the send time, and arrive within about 30 minutes of it.</p>
+    ${RTYPES.map(t => { const r = d.reports[t]; return `<div class="rp${r.on ? "" : " off"}" data-t="${t}">
+      <div class="rp-h"><div><b>${RNAME[t]} report</b><small>${r.on ? `${ruleText(t, r)} at ${hourLabel(r.hour)}` : "Off: not sent"}</small><small>${r.on ? next(t) : ""}</small></div>
+        <label class="sw" aria-label="${RNAME[t]} report on or off"><input type="checkbox" data-k="on"${r.on ? " checked" : ""}><span></span></label></div>
+      ${r.on ? `<div class="${t === "weekly" ? "row2" : ""}">
+        <label class="fld"><span>Send time</span><select data-k="hour">${hours.map(h => `<option value="${h}"${h === r.hour ? " selected" : ""}>${hourLabel(h)}</option>`).join("")}</select></label>
+        ${t === "weekly" ? `<label class="fld"><span>Day</span><select data-k="day"><option value="last"${r.day === "last" ? " selected" : ""}>Last working day</option>${WDAYS.map((w, i) => `<option value="${i + 1}"${r.day === i + 1 ? " selected" : ""}>${w}</option>`).join("")}</select></label>` : ""}</div>
+      <div class="fld"><span>Recipients</span>
+        <div class="tags">${r.to.length ? r.to.map((m, i) => `<span class="tag"><span>${esc(m)}</span><button type="button" data-sc="rm-to" data-i="${i}" aria-label="Remove ${esc(m)}">×</button></span>`).join("") : `<span class="none">No one yet: this report won't be sent until you add someone.</span>`}</div>
+        <div class="add-row"><input type="email" inputmode="email" autocomplete="email" autocapitalize="off" spellcheck="false" placeholder="name@company.com" data-k="new-to"><button type="button" class="btn" data-sc="add-to">Add</button></div>
+        ${SC.emailErr[t] ? `<p class="sched-msg err">${esc(SC.emailErr[t])}</p>` : ""}</div>` : ""}
+    </div>`; }).join("")}
+    <div class="fld"><span>Public holidays (no reports)</span>
+      <div class="tags">${d.holidays.length ? d.holidays.map((k, i) => `<span class="tag"><span>${dfy.format(keyDate(k))}</span><button type="button" data-sc="rm-hol" data-i="${i}" aria-label="Remove ${k}">×</button></span>`).join("") : `<span class="none">None. Reports go out every Monday to Friday.</span>`}</div>
+      <div class="add-row"><input type="date" data-k="new-hol" aria-label="Holiday date"><button type="button" class="btn" data-sc="add-hol">Add</button></div>
+      <p class="hint">If a weekly or monthly report falls on a holiday, it goes out the working day before.</p></div>
+    <div class="rp-h"><div><b>Save PDF copies to Google Drive</b><small>In the "Grid Downtime Reports" folder</small></div>
+      <label class="sw" aria-label="Save PDF copies to Drive"><input type="checkbox" data-k="drive"${d.saveToDrive ? " checked" : ""}><span></span></label></div>
+    <div class="sched-foot">
+      <div class="actions"><button type="button" class="btn primary" data-sc="save"${dirty && !SC.saving ? "" : " disabled"}>${SC.saving ? "Saving…" : dirty ? "Save changes" : "Saved"}</button>${dirty && !SC.saving ? `<button type="button" class="btn" data-sc="undo">Undo changes</button>` : ""}</div>
+      ${SC.msg ? `<p class="sched-msg ${SC.msgCls}">${esc(SC.msg)}</p>` : ""}
+      ${SC.saved && SC.saved.me ? `<p class="hint">Test reports always go to ${esc(SC.saved.me)} only.</p>` : ""}</div>`;
+}
+function schedAddEmail(t, input) {
+  const r = SC.draft.reports[t], vals = String(input.value || "").split(/[,;\s]+/).map(s => s.trim()).filter(Boolean);
+  if (!vals.length) { SC.emailErr[t] = "Type an email address first."; renderSched(); return; }
+  const bad = vals.filter(v => !EMAIL_OK(v));
+  if (bad.length) { SC.emailErr[t] = `"${bad[0]}" isn't a valid email address.`; renderSched(); const i = $(`#sched-card .rp[data-t="${t}"] [data-k="new-to"]`); if (i) { i.value = input.value; i.focus(); } return; }
+  vals.forEach(v => { if (!r.to.some(x => x.toLowerCase() === v.toLowerCase())) r.to.push(v); });
+  SC.emailErr[t] = ""; SC.msg = ""; buzz(8); renderSched();
+}
+$("#sched-card").addEventListener("click", e => {
+  const b = e.target.closest("[data-sc]"); if (!b) return;
+  const act = b.dataset.sc, box = b.closest(".rp"), t = box && box.dataset.t;
+  if (act === "reload") { loadSched(true); return; }
+  if (!SC.draft) return;
+  if (act === "add-to") { schedAddEmail(t, box.querySelector('[data-k="new-to"]')); return; }
+  if (act === "rm-to") { SC.draft.reports[t].to.splice(Number(b.dataset.i), 1); SC.msg = ""; renderSched(); return; }
+  if (act === "add-hol") {
+    const v = $('#sched-card [data-k="new-hol"]').value;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) { toast("Pick a date first."); return; }
+    if (!SC.draft.holidays.includes(v)) { SC.draft.holidays.push(v); SC.draft.holidays.sort(); }
+    SC.msg = ""; renderSched(); return;
+  }
+  if (act === "rm-hol") { SC.draft.holidays.splice(Number(b.dataset.i), 1); SC.msg = ""; renderSched(); return; }
+  if (act === "undo") { SC.draft = schedCopy(SC.saved); SC.emailErr = {}; SC.msg = ""; renderSched(); return; }
+  if (act === "save") saveSched();
+});
+$("#sched-card").addEventListener("change", e => {
+  const k = e.target.dataset.k, box = e.target.closest(".rp"), t = box && box.dataset.t; if (!SC.draft || !k) return;
+  if (k === "on") { SC.draft.reports[t].on = e.target.checked; buzz(8); }
+  else if (k === "hour") SC.draft.reports[t].hour = Number(e.target.value);
+  else if (k === "day") SC.draft.reports.weekly.day = e.target.value === "last" ? "last" : Number(e.target.value);
+  else if (k === "drive") SC.draft.saveToDrive = e.target.checked;
+  else return;
+  SC.msg = ""; renderSched();
+});
+$("#sched-card").addEventListener("keydown", e => {
+  if (e.key !== "Enter" || e.target.dataset.k !== "new-to") return;
+  e.preventDefault(); schedAddEmail(e.target.closest(".rp").dataset.t, e.target);
+});
+async function saveSched() {
+  // An address typed but not added yet would be lost: add it first.
+  for (const t of RTYPES) { const i = $(`#sched-card .rp[data-t="${t}"] [data-k="new-to"]`); if (i && i.value.trim()) { schedAddEmail(t, i); if (SC.emailErr[t]) return; } }
+  SC.saving = true; SC.msg = ""; renderSched();
+  try {
+    const j = await api({ action: "saveSettings", settings: schedCopy(SC.draft) }, 45000);
+    if (j && j.ok && j.settings) {
+      SC.saved = j.settings; save(LS_SCHED, j.settings); SC.draft = schedCopy(j.settings); SC.loadedAt = Date.now();
+      SC.msg = "Saved. Reports will follow this schedule from now on."; SC.msgCls = "ok"; buzz(12); renderRepHint();
+    } else { SC.msg = j && j.error === "bad_key" ? "The key was rejected. Reconnect from the Sheet." : "Couldn't save: " + ((j && (j.message || j.error)) || "no answer") + ". Make sure the Google script is up to date."; SC.msgCls = "err"; }
+  } catch (e) { SC.msg = "Couldn't reach Google. Your changes are still here; save again when you have signal."; SC.msgCls = "err"; }
+  SC.saving = false; renderSched();
+}
+renderRepHint();
+
 function renderMore() {
   renderConn();
+  // Redraw the schedule only when nothing in it is being edited, so a background sync doesn't wipe typing.
+  const sc = $("#sched-card"); if (!sc.contains(document.activeElement) || !sc.innerHTML) renderSched();
+  loadSched(false);
   document.querySelectorAll("[data-test]").forEach(b => { b.disabled = !cfg; });
   $("#cause-list").innerHTML = CAUSES.map(c => `<span class="chip" style="--cc:${cc(c)}"><i></i>${esc(c)}</span>`).join("");
   $("#ver").textContent = `Version ${VERSION} · ${plural(EV.length, "entry")} on this phone`;
@@ -567,7 +695,7 @@ $("#conn-card").addEventListener("click", e => {
   if (id === "cf-sync") { toast("Syncing…"); sync(); }
   if (id === "cf-off") {
     if (!offArmed) { offArmed = true; e.target.textContent = "Tap again to disconnect"; e.target.classList.add("armed"); setTimeout(() => { offArmed = false; renderConn(); }, 4000); return; }
-    cfg = null; try { localStorage.removeItem(LS_CFG); } catch (er) {} net = "local"; S.synced = false; persist(); remoteEvents = null; remoteActive = undefined; offArmed = false; render(); toast("Disconnected. Your entries stay on this phone.");
+    cfg = null; try { localStorage.removeItem(LS_CFG); localStorage.removeItem(LS_SCHED); } catch (er) {} SC.saved = SC.draft = null; SC.loadedAt = 0; SC.msg = ""; net = "local"; S.synced = false; persist(); remoteEvents = null; remoteActive = undefined; offArmed = false; render(); toast("Disconnected. Your entries stay on this phone.");
   }
 });
 document.querySelectorAll("[data-test]").forEach(b => b.addEventListener("click", async () => {
@@ -596,7 +724,7 @@ $("#bk-file").addEventListener("change", e => {
     if (!Array.isArray(arr)) { box.innerHTML = `<p class="ed-msg err">That file isn't a backup from this app.</p>`; return; }
     restoreSet = arr.filter(x => x && isFinite(Date.parse(x.start)) && isFinite(Date.parse(x.end)) && Date.parse(x.end) >= Date.parse(x.start))
       .map(x => ({ id: typeof x.id === "string" && /^[A-Za-z0-9_\-.~:@+]{1,100}$/.test(x.id) ? x.id : newId(),
-        data: eventData(new Date(Date.parse(x.start)).toISOString(), new Date(Date.parse(x.end)).toISOString(), issuesOf(x).slice(0, 30).map(i => ({ robot: i.robot.slice(0, 80), cause: i.cause })), String(x.notes || "").slice(0, 2000)) }));
+        data: eventData(new Date(Date.parse(x.start)).toISOString(), new Date(Date.parse(x.end)).toISOString(), issuesOf(x).slice(0, 30).map(i => ({ robot: i.robot.slice(0, 80), cause: i.cause, note: i.note.slice(0, 2000) }))) }));
     const fresh = restoreSet.filter(x => !S.events[x.id]).length;
     box.innerHTML = restoreSet.length ? `<p>Restore ${plural(restoreSet.length, "entry")} (${fresh} new, ${restoreSet.length - fresh} updated)?</p><div class="actions" style="margin-top:8px"><button type="button" class="btn primary" id="bk-go">Restore</button><button type="button" class="btn" id="bk-no">Cancel</button></div>` : `<p class="ed-msg err">No valid entries found in that file.</p>`;
   };
@@ -629,7 +757,6 @@ function openEdit(id) {
   $("#ed-title").textContent = e ? "Edit downtime" : "Add past downtime";
   const now = Date.now(), s = e ? Date.parse(e.start) : now - 15 * 60000, en = e ? Date.parse(e.end) : now;
   edS.value = toInput(s); edE.value = toInput(en);
-  $("#ed-notes").value = e ? e.notes || "" : "";
   const del = $("#ed-del"); del.hidden = !e; del.classList.remove("armed"); del.textContent = "Delete";
   setEdMsg(""); edBox.innerHTML = issuesHTML(ED.issues); edCheck();
   openSheet(sheet);
@@ -667,7 +794,7 @@ $("#ed-form").addEventListener("submit", e => {
   e.preventDefault();
   const err = edCheck(); if (err) { setEdMsg(err, "err"); buzz([20, 40, 20]); return; }
   const { s, e: en } = edTimes(), id = ED.id || newId();
-  commit({ t: "ev", id, data: eventData(new Date(s).toISOString(), new Date(en).toISOString(), readIssues(edBox), $("#ed-notes").value.trim()) });
+  commit({ t: "ev", id, data: eventData(new Date(s).toISOString(), new Date(en).toISOString(), readIssues(edBox)) });
   buzz(10); closeEdit(); toast(ED.orig ? "Changes saved" : "Downtime added");
 });
 $("#ed-del").onclick = () => {

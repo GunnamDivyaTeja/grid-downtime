@@ -4,7 +4,7 @@
  */
 (function () {
 "use strict";
-const VERSION = "1.1.0";
+const VERSION = "1.3.0";
 const CAUSES = ["Collision", "Human Error", "Network Error", "Robot Error", "Low Battery"];
 const ORDER = [...CAUSES, ""];
 const CVAR = { "Collision": "--c1", "Human Error": "--c2", "Network Error": "--c3", "Robot Error": "--c4", "Low Battery": "--c5" };
@@ -35,7 +35,6 @@ const fromInput = v => v ? new Date(v).getTime() : NaN;
 const isoDate = ms => { const d = new Date(ms); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const newId = () => "e" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-const clip = (x, a, b) => Math.max(0, Math.min(x.e, b) - Math.max(x.s, a));
 const plural = (n, w) => `${n} ${n === 1 ? w : w === "entry" ? "entries" : w + "s"}`;
 
 /* ---------- storage on the phone ---------- */
@@ -47,6 +46,37 @@ if (!Array.isArray(S.pending)) S.pending = [];
 let cfg = load(LS_CFG, null);
 let prefs = Object.assign({ mode: "week" }, load(LS_PREFS, {}));
 const persist = () => save(LS, S);
+
+/* ---------- shift hours: downtime only counts inside the shift, on working days ---------- */
+const LS_SCHED = "grid-downtime.sched";
+const DEFAULT_SHIFT = { start: 360, end: 840 }; // 6:00 am – 2:00 pm, minutes after midnight
+let SHIFT = shiftFrom(load(LS_SCHED, null));
+function shiftFrom(s) {
+  const sh = s && s.shift && s.shift.end > s.shift.start ? s.shift : DEFAULT_SHIFT;
+  return { start: sh.start, end: sh.end, hol: (s && Array.isArray(s.holidays)) ? s.holidays : [] };
+}
+const atMin = (day, m) => { const d = new Date(day); d.setHours(0, m, 0, 0); return d.getTime(); };
+const isShiftDay = day => { const w = new Date(day).getDay(); return w >= 1 && w <= 5 && !SHIFT.hol.includes(isoDate(day)); };
+const minLabel = m => fmtTime(atMin(sod(Date.now()), m));
+/** Time of stoppage x between a and b that falls inside shift hours. */
+function clip(x, a, b) {
+  const lo = Math.max(x.s, a), hi = Math.min(x.e, b);
+  if (!(hi > lo)) return 0;
+  let t = 0;
+  for (let d = sod(lo); d <= hi; d = addDays(d, 1)) {
+    if (!isShiftDay(d)) continue;
+    t += Math.max(0, Math.min(hi, atMin(d, SHIFT.end)) - Math.max(lo, atMin(d, SHIFT.start)));
+  }
+  return t;
+}
+/** Where `now` is relative to the shift: { on } during it, otherwise the next start and (today) the end. */
+function shiftNow(now) {
+  const d = sod(now), s = atMin(d, SHIFT.start), e = atMin(d, SHIFT.end), work = isShiftDay(d);
+  if (work && now >= s && now < e) return { on: true, s, e };
+  let next = work && now < s ? s : null;
+  for (let i = 1; !next && i < 20; i++) { const dd = addDays(d, i); if (isShiftDay(dd)) next = atMin(dd, SHIFT.start); }
+  return { on: false, next, ended: work && now >= e ? e : null };
+}
 
 /* ---------- entries ---------- */
 const blankIssue = () => ({ robot: "", cause: "", note: "" });
@@ -77,6 +107,7 @@ function items(now) {
   if (S.active) { const s = Date.parse(S.active.start); if (isFinite(s)) l.unshift(toItem("live", S.active, s, Math.max(s, now), true)); }
   return l;
 }
+// Entries logged outside the shift still show in lists (counted as 0), so nothing seems to vanish.
 const inRange = (a, b, now) => items(now).filter(x => clip(x, a, b) > 0 || (x.s >= a && x.s < b));
 
 /* ---------- change queue ---------- */
@@ -120,14 +151,23 @@ async function sync() {
   syncing = true; updateSync();
   const sent = S.pending.slice(), seqs = new Set(sent.map(o => o.seq));
   try {
-    const j = await api({ action: "sync", ops: sent.map(({ seq, ...o }) => o) });
+    // Only changes since the last sync are downloaded; everything is fetched again once a day to be safe.
+    const full = !S.since || !S.fullAt || Date.now() - S.fullAt > 864e5;
+    const j = await api({ action: "sync", ops: sent.map(({ seq, ...o }) => o), since: full ? undefined : S.since });
     if (!j || !j.ok) {
       net = j && j.error === "bad_key" ? "badkey" : "error";
       syncErr = (j && (j.message || j.error)) || "No answer";
     } else {
       S.pending = S.pending.filter(o => !seqs.has(o.seq));
       const m = {}; (j.events || []).forEach(e => { if (e && e.id) m[e.id] = { start: e.start, end: e.end, issues: e.issues, notes: e.notes || "" }; });
-      remoteEvents = m; remoteActive = j.active || null;
+      if (j.full !== false) { remoteEvents = m; S.fullAt = Date.now(); } // older scripts always send everything
+      else {
+        const base = { ...(remoteEvents || S.events) };
+        (j.deleted || []).forEach(id => { delete base[id]; });
+        remoteEvents = Object.assign(base, m);
+      }
+      S.since = typeof j.time === "string" ? j.time : null;
+      remoteActive = j.active || null;
       S.synced = true; S.lastSync = Date.now(); net = "online"; syncErr = "";
       rebuild();
     }
@@ -149,7 +189,7 @@ function connectWith(url, key, quiet) {
   url = String(url || "").trim(); key = String(key || "").trim();
   const okUrl = /^https:\/\/script\.google(usercontent)?\.com\//.test(url) || (/^(localhost|127\.0\.0\.1)$/.test(location.hostname) && /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?\//.test(url)); // localhost only when testing locally
   if (!okUrl || key.length < 16) { toast("That doesn't look like a valid connect link."); return false; }
-  cfg = { url, key }; save(LS_CFG, cfg); net = "connecting";
+  cfg = { url, key }; save(LS_CFG, cfg); net = "connecting"; S.since = null; S.fullAt = 0; remoteEvents = null;
   // Upload anything logged on this phone before it was connected.
   if (!S.synced) Object.entries(S.events).forEach(([id, data]) => { if (!S.pending.some(p => opKey(p) === "e:" + id)) S.pending.push({ t: "ev", id, data, seq: ++S.seq }); });
   if (!S.synced && S.active && !S.pending.some(p => p.t === "act")) S.pending.push({ t: "act", data: S.active, seq: ++S.seq });
@@ -245,7 +285,7 @@ function issuesHTML(list) {
   const one = list.length === 1;
   return list.map((it, i) => `<div class="issue" data-i="${i}">
     <div class="iss-h"><span class="fld-label">${one ? "Robot and cause" : `Robot ${i + 1}${i === 0 ? " · main cause" : ""}`}</span>${one ? "" : `<button type="button" class="link rm" data-act="rm">Remove</button>`}</div>
-    <input class="iss-robot" autocomplete="off" autocapitalize="characters" placeholder="Robot ID, e.g. R-112" value="${esc(it.robot)}" aria-label="Robot ${i + 1} ID">
+    <input class="iss-robot" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" enterkeyhint="done" placeholder="Robot number, e.g. 41659" value="${esc(it.robot)}" aria-label="Robot ${i + 1} number">
     <div class="chips">${chipsHTML(it.cause)}</div>
     <textarea class="iss-note" rows="2" placeholder="Notes: what was wrong, what you did" aria-label="Robot ${i + 1} notes">${esc(it.note || "")}</textarea></div>`).join("") + `<button type="button" class="btn add" data-act="add">+ Add another robot</button>`;
 }
@@ -278,11 +318,20 @@ function rowHTML(x, withDate) {
     <span class="r-main"><span class="r-time">${fmtTime(x.s)} – ${end}${withDate ? ` <em>${df.format(x.s)}</em>` : ""}</span>
     <span class="r-meta">${metaHTML(x)}${x.live ? " · in progress" : ""}</span>
     ${x.notes ? `<span class="r-notes">${esc(x.notes)}</span>` : ""}</span>
-    <span class="r-dur">${fmtDur(x.e - x.s)}</span></button>`;
+    ${durHTML(x)}</button>`;
+}
+/** Counted (in-shift) duration; when part of it was outside the shift, the full length is shown under it. */
+/** Share of shift time (so far) the grid was up, e.g. "97.4%". */
+function availText(down, a, b) { const shiftMs = clip({ s: a, e: b }, a, b); return shiftMs > 0 ? (Math.max(0, 1 - down / shiftMs) * 100).toFixed(1) + "%" : "—"; }
+function durHTML(x) {
+  const full = x.e - x.s, c = clip(x, x.s, x.e);
+  if (full - c < 60000) return `<span class="r-dur">${fmtDur(full)}</span>`;
+  return `<span class="r-dur">${c ? fmtDur(c) : "0m"}<small>${c ? `of ${fmtDur(full)}` : "off shift"}</small></span>`;
 }
 function stats(list, a, b) {
   let total = 0, longest = null; const by = {}, robots = {};
   const slot = k => by[k] || (by[k] = { ms: 0, n: 0, issues: 0 });
+  list = list.filter(x => x.live || clip(x, a, b) > 0); // stoppages wholly outside the shift don't count
   list.forEach(x => {
     const d = clip(x, a, b); total += d; if (!longest || d > longest.d) longest = { d, x };
     const m = slot(x.cause || ""); m.ms += d; m.n++;
@@ -320,12 +369,17 @@ const big = $("#big"), actBox = $("#act-issues");
 const lastEnded = () => EV.reduce((m, x) => x.e > m ? x.e : m, 0);
 function renderLog() {
   const now = Date.now(), a = S.active;
-  $("#status").classList.toggle("stopped", !!a);
-  $("#st-label").textContent = a ? "Grid stopped" : "Grid running";
   $("#big-t").textContent = a ? "Grid ON" : "Grid OFF";
-  $("#big-s").textContent = a ? "Tap when the grid is back on" : "Tap when you stop the grid";
+  $("#big-s").textContent = a ? "Tap when the grid is back on" : shiftNow(now).on ? "Tap when you stop the grid" : `Outside shift hours: only time from ${minLabel(SHIFT.start)} counts`;
   tickClock(now);
   $("#stop-details").hidden = !a;
+  const over = a && missedShiftEnd(a, now), so = $("#shift-over");
+  so.hidden = !over;
+  if (over && so.dataset.end !== String(over)) {
+    so.dataset.end = over;
+    so.innerHTML = `<p><b>Still stopped?</b> This stoppage was still open when the shift ended at ${fmtTime(over)}${sod(over) !== sod(now) ? " on " + df.format(over) : ""}. Time after the shift isn't counted.</p>
+      <button type="button" class="btn" data-end="${over}">Grid was back on at ${fmtTime(over)}</button>`;
+  }
   if (a) {
     const ae = document.activeElement;
     // Redraw the robot cards only when they differ from what's saved, so a tap on a card's button isn't lost
@@ -337,13 +391,24 @@ function renderLog() {
   }
   renderToday(now);
 }
+/** The status panel. Time only runs during the shift: outside it the panel says "Off shift". */
 function tickClock(now) {
-  const a = S.active, c = $("#clock"), sub = $("#st-sub");
-  if (a) { const s = Date.parse(a.start); c.textContent = fmtClock(now - s); sub.textContent = `Stopped at ${fmtTime(s)}${sod(s) !== sod(now) ? " on " + df.format(s) : ""}`; }
-  else {
-    const le = lastEnded();
-    if (le) { c.textContent = fmtClock(now - le); sub.textContent = `Running since ${fmtTime(le)}${sod(le) !== sod(now) ? " on " + df.format(le) : ""}`; }
-    else { c.textContent = "00:00:00"; sub.textContent = "No downtime logged yet"; }
+  const a = S.active, c = $("#clock"), sub = $("#st-sub"), sh = shiftNow(now), st = $("#status");
+  const label = (t, cls) => { $("#st-label").textContent = t; st.classList.toggle("stopped", cls === "stopped"); st.classList.toggle("offshift", cls === "off"); };
+  const nextTxt = () => sh.next ? (sod(sh.next) === sod(now) ? `Shift starts at ${fmtTime(sh.next)}` : `Next shift ${df.format(sh.next)}, ${fmtTime(sh.next)}`) : "";
+  if (a) {
+    const s = Date.parse(a.start);
+    // Only downtime inside the shift counts, so the clock shows the counted time.
+    c.textContent = fmtClock(clip({ s, e: now }, s, now));
+    label("Grid stopped", "stopped");
+    sub.textContent = `Stopped at ${fmtTime(s)}${sod(s) !== sod(now) ? " on " + df.format(s) : ""}` + (sh.on ? "" : sh.ended ? ` · shift ended at ${fmtTime(sh.ended)}, not counting` : " · off shift, not counting yet");
+  } else if (sh.on) {
+    const from = Math.max(lastEnded(), sh.s);
+    c.textContent = fmtClock(now - from); label("Grid running", "run");
+    sub.textContent = from === sh.s ? `Shift started at ${fmtTime(sh.s)} · ends ${fmtTime(sh.e)}` : `Running since ${fmtTime(from)} · shift ends ${fmtTime(sh.e)}`;
+  } else {
+    c.textContent = "--:--:--"; label("Off shift", "off");
+    sub.textContent = (sh.ended ? `Shift ended at ${fmtTime(sh.ended)}. ` : "") + nextTxt();
   }
 }
 function renderToday(now) {
@@ -359,16 +424,28 @@ big.onclick = () => {
   if (!S.active) {
     commit({ t: "act", data: { start: iso, issues: [blankIssue()], notes: "" } });
     toast(`Downtime started at ${fmtTime(now)}`, "Undo", () => commit({ t: "act", data: null }));
-  } else {
-    clearTimeout(actT);
-    const a = S.active, id = newId();
-    const data = eventData(a.start, iso, readIssues(actBox));
-    commit({ t: "ev", id, data }); commit({ t: "act", data: null });
-    const d = now - Date.parse(a.start);
-    if (!mainCause(data.issues)) { openEdit(id); setEdMsg(`Logged ${fmtDur(d)} of downtime. Pick a cause and save.`, "info"); }
-    else toast(`Logged ${fmtDur(d)} of downtime`, "Undo", () => { commit({ t: "del", id }); commit({ t: "act", data: a }); });
-  }
+  } else closeActive(now);
 };
+/** Grid back on at `end` (now, or the end of the shift when the stoppage was left open). */
+function closeActive(end) {
+  clearTimeout(actT);
+  const a = S.active, id = newId();
+  const data = eventData(a.start, new Date(end).toISOString(), readIssues(actBox));
+  commit({ t: "ev", id, data }); commit({ t: "act", data: null });
+  const d = end - Date.parse(a.start);
+  if (!mainCause(data.issues)) { openEdit(id); setEdMsg(`Logged ${fmtDur(d)} of downtime. Pick a cause and save.`, "info"); }
+  else toast(`Logged ${fmtDur(d)} of downtime`, "Undo", () => { commit({ t: "del", id }); commit({ t: "act", data: a }); });
+}
+/** The end of the shift a stoppage was left open past (10 minutes' grace), or null. */
+function missedShiftEnd(a, now) {
+  const s = Date.parse(a.start); if (!isFinite(s)) return null;
+  const e = atMin(sod(s), SHIFT.end);
+  return s < e && now > e + 10 * 60000 ? e : null;
+}
+$("#shift-over").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b || !S.active) return;
+  const end = Number(b.dataset.end); if (end > Date.parse(S.active.start)) { buzz([12, 60, 12]); closeActive(end); }
+});
 function patchActive(p) { if (S.active) commit({ t: "act", data: { ...S.active, ...p } }); }
 actBox.addEventListener("click", e => {
   if (!S.active) return; const r = issueClick(actBox, e); if (!r) return;
@@ -398,7 +475,7 @@ function renderHistory() {
   let list = items(now); if (histFilter !== null) list = list.filter(x => histFilter === "" ? !x.cause : x.issues.some(i => i.cause === histFilter));
   if (!list.length) { $("#hist-list").innerHTML = `<div class="empty">${EV.length ? "No entries with this cause." : "Nothing logged yet. Entries appear here after you log downtime."}</div>`; return; }
   const shown = list.slice(0, histLimit); let h = "", day = null;
-  const dayTot = {}; list.forEach(x => { const k = sod(x.s); dayTot[k] = (dayTot[k] || 0) + (x.e - x.s); });
+  const dayTot = {}; list.forEach(x => { const k = sod(x.s); dayTot[k] = (dayTot[k] || 0) + clip(x, x.s, x.e); });
   shown.forEach(x => { const k = sod(x.s); if (k !== day) { day = k; h += `<div class="day-h"><span>${dfy.format(k)}</span><b>${fmtDur(dayTot[k])}</b></div>`; } h += rowHTML(x); });
   if (list.length > histLimit) h += `<button type="button" class="btn" id="hist-more">Show more (${list.length - histLimit} older)</button>`;
   $("#hist-list").innerHTML = h;
@@ -467,11 +544,11 @@ function renderReports() {
   $("#rep-sub").textContent = sub;
 
   let h = `<div class="metrics">
-    <div class="m-main"><div class="m-k">Total grid downtime</div><div class="m-v">${fmtDur(st.total)}</div><div class="m-x">${plural(st.n, "stoppage")}${live ? " · includes the stoppage in progress" : ""}</div></div>
+    <div class="m-main"><div class="m-k">Total grid downtime</div><div class="m-v">${fmtDur(st.total)}</div><div class="m-x">${plural(st.n, "stoppage")} · grid up ${availText(st.total, r.a, Math.min(r.b, Date.now()))} of shift time${live ? " · includes the stoppage in progress" : ""}</div></div>
     <div><div class="m-k">Average stop</div><div class="m-v">${st.n ? fmtDur(st.avg) : "—"}</div></div>
     <div><div class="m-k">Longest stop</div><div class="m-v">${st.longest ? fmtDur(st.longest.d) : "—"}</div>${st.longest ? `<div class="m-x">${esc(causeLabel(st.longest.x.cause))}</div>` : ""}</div>
     ${R.mode !== "day" ? `<div><div class="m-k">Per working day</div><div class="m-v">${wd ? fmtDur(st.total / wd) : "—"}</div></div><div><div class="m-k">Robots involved</div><div class="m-v">${st.robots.length}</div></div>`
-      : `<div><div class="m-k">Robots involved</div><div class="m-v">${st.robots.length}</div></div><div><div class="m-k">Share of the day</div><div class="m-v">${((st.total / (r.b - r.a)) * 100).toFixed(1)}%</div></div>`}
+      : `<div><div class="m-k">Robots involved</div><div class="m-v">${st.robots.length}</div></div><div><div class="m-k">Shift time</div><div class="m-v">${fmtDur(clip({ s: r.a, e: Math.min(r.b, Date.now()) }, r.a, Math.min(r.b, Date.now())))}</div></div>`}
   </div>`;
   const used = ORDER.filter(k => st.by[k]);
   const legend = used.length ? `<div class="legend">${used.map(k => `<span><i style="background:${cc(k)}"></i>${esc(causeLabel(k))}</span>`).join("")}</div>` : "";
@@ -530,9 +607,9 @@ function summaryText() {
 }
 function csvText(list, a, b) {
   const q = v => { v = String(v ?? ""); return /[",\n\r]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v; };
-  const rows = [["Date", "Grid off", "Grid on", "Duration (min)", "Minutes in this period", "Main cause", "Robots", "Robot count", "Robots and causes", "Notes"]];
+  const rows = [["Date", "Grid off", "Grid on", "Duration (min)", "Counted minutes (in shift, this period)", "Main cause", "Robots", "Robot count", "Robots and causes", "Notes"]];
   list.slice().sort((x, y) => x.s - y.s).forEach(x => rows.push([isoDate(x.s), toInput(x.s).replace("T", " "), x.live ? "in progress" : toInput(x.e).replace("T", " "), ((x.e - x.s) / 60000).toFixed(1),
-    a == null ? ((x.e - x.s) / 60000).toFixed(1) : (clip(x, a, b) / 60000).toFixed(1), x.cause || "", x.robots.join(", "), x.robots.length,
+    a == null ? (clip(x, x.s, x.e) / 60000).toFixed(1) : (clip(x, a, b) / 60000).toFixed(1), x.cause || "", x.robots.join(", "), x.robots.length,
     x.issues.filter(i => i.robot || i.cause).map(i => `${i.robot || "?"}: ${i.cause || "not set"}`).join("; "), x.notes]));
   return "﻿" + rows.map(r => r.map(q).join(",")).join("\r\n");
 }
@@ -563,15 +640,21 @@ function renderConn() {
 }
 /* Report schedule: stored in the Google Sheet, edited here. The last copy loaded is kept on the
    phone so the screen (and the Reports tab's note) can show it without signal. */
-const LS_SCHED = "grid-downtime.sched";
-const SC = { saved: load(LS_SCHED, null), draft: null, loading: false, saving: false, msg: "", msgCls: "", loadedAt: 0, emailErr: {} };
+const SC ={ saved: load(LS_SCHED, null), draft: null, loading: false, saving: false, msg: "", msgCls: "", loadedAt: 0, emailErr: {} };
 const RTYPES = ["daily", "weekly", "monthly"], RNAME = { daily: "Daily", weekly: "Weekly", monthly: "Monthly" };
 const WDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
 const EMAIL_OK = s => /^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]+$/.test(s);
 const hourLabel = h => `${h % 12 || 12}:00 ${h < 12 ? "am" : "pm"}`;
 const keyDate = k => new Date(k + "T12:00:00");
-const schedCopy = s => s && JSON.parse(JSON.stringify({ reports: s.reports, holidays: s.holidays, saveToDrive: s.saveToDrive }));
+const schedCopy = s => s && JSON.parse(JSON.stringify({ shift: s.shift || DEFAULT_SHIFT, reports: s.reports, holidays: s.holidays, saveToDrive: s.saveToDrive }));
+/** New settings from Google: remember them and recount everything with the (possibly new) shift hours. */
+function schedArrived(st) { SC.saved = st; save(LS_SCHED, st); SHIFT = shiftFrom(st); render(); }
 const schedDirty = () => !!(SC.draft && SC.saved && JSON.stringify(schedCopy(SC.draft)) !== JSON.stringify(schedCopy(SC.saved)));
+/** Half-hour choices from 4:00 am to 11:30 pm (plus the current value if it's something else). */
+function shiftOpts(sel) {
+  const v = [...new Set([...Array.from({ length: 40 }, (_, i) => 240 + i * 30), sel])].sort((a, b) => a - b);
+  return v.map(m => `<option value="${m}"${m === sel ? " selected" : ""}>${minLabel(m)}</option>`).join("");
+}
 function ruleText(t, r) {
   if (t === "daily") return "Every working day";
   if (t === "weekly") return r.day === "last" ? "Last working day of the week" : `Every ${WDAYS[r.day - 1]}`;
@@ -582,7 +665,7 @@ async function loadSched(force) {
   SC.loading = true; renderSched();
   try {
     const j = await api({ action: "getSettings" }, 30000);
-    if (j && j.ok && j.settings) { SC.saved = j.settings; save(LS_SCHED, j.settings); SC.loadedAt = Date.now(); if (!schedDirty()) SC.draft = schedCopy(j.settings); SC.msg = ""; }
+    if (j && j.ok && j.settings) { schedArrived(j.settings); SC.loadedAt = Date.now(); if (!schedDirty()) SC.draft = schedCopy(j.settings); SC.msg = ""; }
     else SC.msg = j && j.error === "bad_key" ? "The key was rejected. Reconnect from the Sheet." : "Couldn't load the schedule" + (j && j.error === "bad_request" ? "" : ". Update the Google script to the latest version.");
     SC.msgCls = j && j.ok ? "" : "err";
   } catch (e) { SC.msg = SC.saved ? "Offline: showing the schedule from your last connection." : "Connect to the internet to load the schedule."; SC.msgCls = SC.saved ? "" : "err"; }
@@ -603,6 +686,11 @@ function renderSched() {
   const dirty = schedDirty(), hours = [...new Set([...Array.from({ length: 18 }, (_, i) => i + 6), ...RTYPES.map(t => d.reports[t].hour)])].sort((a, b) => a - b);
   const next = t => { const k = SC.saved && SC.saved.next && SC.saved.next[t]; return !dirty && k ? `<span class="rp-next">Next: ${df.format(keyDate(k))}, ${hourLabel(SC.saved.reports[t].hour)}</span>` : ""; };
   el.innerHTML = `<h3>Report schedule</h3>
+    <div class="rp"><div class="rp-h"><div><b>Shift hours</b><small>Downtime and running time only count during the shift, Monday to Friday.</small></div></div>
+      <div class="row2">
+        <label class="fld"><span>Shift starts</span><select data-k="shift-start">${shiftOpts(d.shift.start)}</select></label>
+        <label class="fld"><span>Shift ends</span><select data-k="shift-end">${shiftOpts(d.shift.end)}</select></label></div>
+      ${d.shift.end - d.shift.start < 60 ? `<p class="sched-msg err">The shift must end at least an hour after it starts.</p>` : ""}</div>
     <p class="muted">PDF reports are emailed automatically, Melbourne time. They cover up to the send time, and arrive within about 30 minutes of it.</p>
     ${RTYPES.map(t => { const r = d.reports[t]; return `<div class="rp${r.on ? "" : " off"}" data-t="${t}">
       <div class="rp-h"><div><b>${RNAME[t]} report</b><small>${r.on ? `${ruleText(t, r)} at ${hourLabel(r.hour)}` : "Off: not sent"}</small><small>${r.on ? next(t) : ""}</small></div>
@@ -657,6 +745,8 @@ $("#sched-card").addEventListener("change", e => {
   else if (k === "hour") SC.draft.reports[t].hour = Number(e.target.value);
   else if (k === "day") SC.draft.reports.weekly.day = e.target.value === "last" ? "last" : Number(e.target.value);
   else if (k === "drive") SC.draft.saveToDrive = e.target.checked;
+  else if (k === "shift-start") SC.draft.shift.start = Number(e.target.value);
+  else if (k === "shift-end") SC.draft.shift.end = Number(e.target.value);
   else return;
   SC.msg = ""; renderSched();
 });
@@ -667,11 +757,12 @@ $("#sched-card").addEventListener("keydown", e => {
 async function saveSched() {
   // An address typed but not added yet would be lost: add it first.
   for (const t of RTYPES) { const i = $(`#sched-card .rp[data-t="${t}"] [data-k="new-to"]`); if (i && i.value.trim()) { schedAddEmail(t, i); if (SC.emailErr[t]) return; } }
+  if (SC.draft.shift.end - SC.draft.shift.start < 60) { SC.msg = "The shift must end at least an hour after it starts."; SC.msgCls = "err"; renderSched(); return; }
   SC.saving = true; SC.msg = ""; renderSched();
   try {
     const j = await api({ action: "saveSettings", settings: schedCopy(SC.draft) }, 45000);
     if (j && j.ok && j.settings) {
-      SC.saved = j.settings; save(LS_SCHED, j.settings); SC.draft = schedCopy(j.settings); SC.loadedAt = Date.now();
+      schedArrived(j.settings); SC.draft = schedCopy(j.settings); SC.loadedAt = Date.now();
       SC.msg = "Saved. Reports will follow this schedule from now on."; SC.msgCls = "ok"; buzz(12); renderRepHint();
     } else { SC.msg = j && j.error === "bad_key" ? "The key was rejected. Reconnect from the Sheet." : "Couldn't save: " + ((j && (j.message || j.error)) || "no answer") + ". Make sure the Google script is up to date."; SC.msgCls = "err"; }
   } catch (e) { SC.msg = "Couldn't reach Google. Your changes are still here; save again when you have signal."; SC.msgCls = "err"; }
